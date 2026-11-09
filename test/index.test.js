@@ -8,7 +8,7 @@ import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { CREATE_TOOL, LIST_TOOL, SEND_TOOL, TASK_TOOL, TOOL_NAMES, apply, normalizeConfig, relayContent, watchdogTick } from "../lib/index.js";
+import { ARCHIVE_TOOL, CREATE_TOOL, LIST_TOOL, SEND_TOOL, TASK_TOOL, TOOL_NAMES, apply, normalizeConfig, relayContent, watchdogTick } from "../lib/index.js";
 import { DEFAULT_DUP_WINDOW_MINUTES, deriveState, recordDispatch, stateOf } from "../lib/tasks.js";
 
 const WORKSPACE = "/work/main";
@@ -64,12 +64,19 @@ function harness({ live = [], stored = [], summaries = [], archived = [], titles
 			return { title: session.title };
 		}
 	};
+	const archiveCalls = [];
 	const workspaceRegistry = {
 		archivedSessionIds: archived,
 		// Like the real registry: a missing path rejects, an existing unowned directory is undefined.
 		resolveByPath: async (path) => {
 			if (path.startsWith("/missing")) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
 			return workspaces.find((workspace) => workspace.path === path);
+		},
+		archiveSession: async (id, options) => {
+			archiveCalls.push({ action: "archive", id, options });
+		},
+		unarchiveSession: async (id) => {
+			archiveCalls.push({ action: "unarchive", id });
 		}
 	};
 	const ctx = {
@@ -143,7 +150,7 @@ function harness({ live = [], stored = [], summaries = [], archived = [], titles
 	const failCreate = (error) => {
 		createFailure = error;
 	};
-	return { ctx, tools, listeners, disposers, agents, resumed, flushed, initiatorFree, createRequests, failCreate };
+	return { ctx, tools, listeners, disposers, agents, resumed, flushed, initiatorFree, createRequests, failCreate, archiveCalls };
 }
 
 function exec(agent) {
@@ -804,4 +811,42 @@ test("hostile task ids land in one safe file per id", () => {
 		assert.equal(resolve(dir, name).startsWith(resolve(dir)), true);
 	}
 	assert.equal(stateOf(dir, "../../etc/passwd").rounds, 1);
+});
+
+test("session_archive archives and restores a session without deleting it", async () => {
+	const caller = makeAgent("session-hub", { title: "Hub" });
+	const worker = makeAgent("session-b", { title: "Builder" });
+	const h = harness({ live: [caller, worker] });
+	apply(h.ctx, { watchdog: false });
+	const archive = h.tools.get(ARCHIVE_TOOL);
+	const value = await archive.execute({ session_id: "session-b" }, exec(caller));
+	assert.deepEqual(value, { sessionId: "session-b", archived: true, title: "Builder" });
+	assert.deepEqual(h.archiveCalls, [{ action: "archive", id: "session-b", options: { stopActivity: true } }]);
+	assert.match(archive.output.render({}, value)[0].text, /nothing was deleted/);
+
+	const restored = await archive.execute({ session_id: "session-b", unarchive: true }, exec(caller));
+	assert.equal(restored.archived, false);
+	assert.deepEqual(h.archiveCalls.at(-1), { action: "unarchive", id: "session-b" });
+	assert.equal(archive.presentCall({ session_id: "session-b" }).title, 'Archive session "Builder"');
+	assert.equal(archive.presentCall({ session_id: "session-b", unarchive: true }).title, 'Restore session "Builder"');
+});
+
+test("session_archive refuses itself, subagents, unknown ids and a missing registry", async () => {
+	const caller = makeAgent("session-hub");
+	const child = makeAgent("session-child", { origin: "subagent" });
+	const h = harness({ live: [caller, child] });
+	apply(h.ctx, { watchdog: false });
+	const archive = (args, who = caller) => h.tools.get(ARCHIVE_TOOL).execute(args, exec(who));
+	await assert.rejects(archive({ session_id: "session-hub" }), /cannot archive itself/);
+	await assert.rejects(archive({ session_id: "session-child" }), /goes away with its parent/);
+	await assert.rejects(archive({ session_id: "ghost" }), /was not found/);
+	assert.deepEqual(h.archiveCalls, []);
+
+	const bare = harness({ live: [caller, makeAgent("session-target")] });
+	bare.ctx.get = () => undefined;
+	apply(bare.ctx, { watchdog: false });
+	await assert.rejects(
+		bare.tools.get(ARCHIVE_TOOL).execute({ session_id: "session-target" }, exec(caller)),
+		/does not expose archiveSession/
+	);
 });

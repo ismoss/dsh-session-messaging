@@ -8,7 +8,7 @@
 
 <img src="https://img.shields.io/badge/DeepSeek_Harness-社区插件-4d6bfe?style=flat-square" alt="DeepSeek Harness 社区插件">
 <img src="https://img.shields.io/badge/DSH-0.2.0%2B-4d6bfe?style=flat-square" alt="支持 DSH 0.2.0+">
-<img src="https://img.shields.io/badge/新增工具-4_个-4d6bfe?style=flat-square" alt="新增 4 个工具">
+<img src="https://img.shields.io/badge/新增工具-5_个-4d6bfe?style=flat-square" alt="新增 5 个工具">
 <img src="https://img.shields.io/badge/license-MIT-555?style=flat-square" alt="MIT 许可证">
 
 **中文** · [English](README.en.md)
@@ -19,7 +19,7 @@
 
 <br>
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 社区插件。DSH 自带的消息通道都要求双方有关系：`send_message` 只在直接父子 agent 之间传递，Agent Teams 只在同一个 Team 的成员之间传递，侧栏里两个普通会话之间没有路。装上本插件后，每个顶层会话多了四个工具：找会话、发消息、开新会话，以及查任务看板。收到的消息会标明来自哪个会话，对方可以用同一个工具回复。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 社区插件。DSH 自带的消息通道都要求双方有关系：`send_message` 只在直接父子 agent 之间传递，Agent Teams 只在同一个 Team 的成员之间传递，侧栏里两个普通会话之间没有路。装上本插件后，每个顶层会话多了五个工具：找会话、发消息、开新会话、查任务看板、归档会话。收到的消息会标明来自哪个会话，对方可以用同一个工具回复。
 
 > 本仓库是 [tonyzdev/dsh-session-messaging](https://github.com/tonyzdev/dsh-session-messaging) 的 fork：在上游基础上加了「任务合同」——单写者锁、唤醒自动带已完成、每轮回执。不想用合同就照旧只传 `session_id` + `message`，行为和上游一致。
 
@@ -36,8 +36,9 @@
 - 🆕 **开新会话** — `session_create` 在侧栏新开一个带标题的会话，用你的消息开始第一轮。新会话独立干活，看不到发起方的对话；消息里让它回报，它就会回报。
 - 🏷️ **标明来源** — 收到的消息显示为用户侧气泡，上方写着「来自会话「标题」」。模型看到的是一行来源说明：哪个会话、由对方的 agent 而不是用户撰写、怎么回复。
 - 🔁 **不会互相客套** — 来源说明提醒对方不要只为确认收到而回复，两个会话不会来回说「收到」「好的」停不下来。
-- 🛡️ **有边界** — 不能发给自己、子 agent 会话或已归档的会话；单条消息上限 64 KB；每个会话每次运行最多开 10 个新会话；子 agent 看不到这四个工具。
+- 🛡️ **有边界** — 不能发给自己、子 agent 会话或已归档的会话；单条消息上限 64 KB；每个会话每次运行最多开 10 个新会话；子 agent 看不到这五个工具。
 - 📒 **任务合同**（本 fork 新增）— 带 `task_id` 发消息时记一笔只追加的账：同一个任务同时只有一个写者、每次唤醒自动带上「已完成」、每一轮用 `status` 回报收尾。看板写到 `board.md`，`session_tasks` 随时查。还有看门狗：一轮超过 25 分钟没有回执就当失联，自动重派并通知中枢。
+- 🗂️ **归档会话**（本 fork 新增）— `session_archive` 让中枢把干完的子会话收进归档：离开侧栏、不再接收消息，但一条记录都不删，`unarchive: true` 随时恢复。删除不开放给模型——它不可逆，留在会话菜单里由人点。
 
 ## 安装
 
@@ -133,6 +134,7 @@ git clone https://github.com/tonyzdev/dsh-session-messaging ~/.dsh/local-plugins
 | `session_send_message` | `session_id` `message` `delivery?` `task_id?` `this_round?` `already_done?` `status?` `done?` `note?` `task_title?` `force?` | 发消息；带 `task_id` 就是一次派活（带上下文、拿锁），带 `status` 就是一次回执 |
 | `session_create` | `title` `message` `workspace?` `task_id?` `this_round?` `already_done?` `note?` `force?` | 新开会话并用消息开始第一轮；带 `task_id` 时新会话直接成为该任务的写者 |
 | `session_tasks` | `task_id?` `limit?` | 任务看板：谁在干、第几轮、已完成、本次只做 |
+| `session_archive` | `session_id` `unarchive?` | 把会话收进归档（离开侧栏、不再收消息，可恢复）；不提供删除 |
 
 工具只返回送达确认，不返回对方的回答；回答会作为一条新消息回到发送方会话。
 
@@ -276,7 +278,7 @@ sequenceDiagram
 
 | 文件 | 位置 | 作用 |
 | --- | :---: | --- |
-| `lib/index.js` | Host | 四个工具、消息转发、任务上下文注入、看门狗、对子 agent 隐藏工具 |
+| `lib/index.js` | Host | 五个工具、消息转发、任务上下文注入、看门狗、对子 agent 隐藏工具 |
 | `lib/tasks.js` | Host | 任务账本：事件折叠、单写者规则、重复派活保护、`board.md` 渲染 |
 | `lib/client.js` | 浏览器 | 把转发的消息画成用户侧气泡，并标注来源会话 |
 | `cordis.patch.yml` | 补丁 | 插件行和默认配置 |
@@ -291,7 +293,7 @@ sequenceDiagram
 - 开新会话走 `sessionController.create({ workspaceId })`，也就是网页端「新对话」的路径；在第一轮开始前先改好标题，因为转发的消息不会触发 DSH 的自动起标题。
 - 两者都在 `withoutInitiator` 里执行：对方是独立的顶层会话，不算发送方这一轮发起的子任务。
 - 来源说明以空行结尾，因为相邻的文本块到模型那里会直接拼接在一起。
-- 子 agent 在 `agent/created` 时通过 `agent.ctx.tools.restrict({ deny })` 隐藏这四个工具：它们无法通过这条通道收到回复。
+- 子 agent 在 `agent/created` 时通过 `agent.ctx.tools.restrict({ deny })` 隐藏这五个工具：它们无法通过这条通道收到回复。
 - 浏览器端覆盖 Chat 的 `turn-trigger` 渲染器，只接管本插件转发的消息，复用 DSH 自带的 `conversation.chat.user.content` 气泡；目标、定时任务、子 agent 等其他触发消息仍用 DSH 自带的卡片。只改显示，模型收到的内容不变。
 
 </details>
@@ -306,6 +308,7 @@ sequenceDiagram
 - 合同是软约束：对方不按格式回报时，插件不会替你追问，只在 `session_tasks` 里显示「第 N 轮、没有回执」。
 - 看门狗按「没有回执」判失联，分不清「它挂了」和「它干完了但没回报」——后者也会被重派一次。回执不是形式主义，不加回执就得接受这个代价。
 - 重派有上限（默认 2 次），不做无限重试：无限重试只会把 token 烧在一个坏掉的任务上。
+- 归档一个还持有任务的会话，等于把它变成「失联」：看门狗会按超时重派，而归档中的会话收不到消息。先让它回执结束任务，再归档。
 - `board.md` 每记一笔就全量重算：50 个任务约 13 ms，500 个约 74 ms（本机实测）。任务多了可以把已结束任务的 JSONL 直接删掉，看板会随之重建。
 - 「送达」只代表对方的收件箱接受了消息，不代表已经处理；没有重试、去重或已读回执。
 - 对方正在运行时收到的消息会并入它这一轮，模型能收到，但不会显示成气泡。只有唤醒会话的消息显示为气泡。

@@ -8,7 +8,7 @@
 
 <img src="https://img.shields.io/badge/DeepSeek_Harness-community_plugin-4d6bfe?style=flat-square" alt="DeepSeek Harness community plugin">
 <img src="https://img.shields.io/badge/DSH-0.2.0%2B-4d6bfe?style=flat-square" alt="DSH 0.2.0+">
-<img src="https://img.shields.io/badge/new_tools-4-4d6bfe?style=flat-square" alt="4 new tools">
+<img src="https://img.shields.io/badge/new_tools-5-4d6bfe?style=flat-square" alt="5 new tools">
 <img src="https://img.shields.io/badge/license-MIT-555?style=flat-square" alt="MIT license">
 
 [中文](README.md) · **English**
@@ -19,7 +19,7 @@
 
 <br>
 
-A community plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). Every built-in message channel in DSH needs a relationship between the two sides: `send_message` only reaches a direct parent or child agent, and Agent Teams only reaches members of the same Team, so two ordinary sessions in the sidebar have no way to talk. With this plugin, every top-level session gets four tools: find sessions, send a message, open a new session, and read the task board. A received message says which session it came from, and the recipient can reply with the same tool.
+A community plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). Every built-in message channel in DSH needs a relationship between the two sides: `send_message` only reaches a direct parent or child agent, and Agent Teams only reaches members of the same Team, so two ordinary sessions in the sidebar have no way to talk. With this plugin, every top-level session gets five tools: find sessions, send a message, open a new session, read the task board, and archive a session. A received message says which session it came from, and the recipient can reply with the same tool.
 
 > This repository is a fork of [tonyzdev/dsh-session-messaging](https://github.com/tonyzdev/dsh-session-messaging) that adds a task contract: one writer per task, the wake-up carrying what is already done, and a per-round receipt. Without a `task_id` it behaves exactly like upstream.
 
@@ -37,7 +37,8 @@ A community plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepsee
 - 🏷️ **Shows the sender** — a received message appears as a user-style bubble marked “From session “title””. The model sees an attribution line: which session sent it, that the other session's agent wrote it rather than the user, and how to reply.
 - 🔁 **No pleasantry loops** — the attribution line tells the recipient not to reply only to acknowledge, so two sessions don't trade “got it” and “thanks” forever.
 - 🛡️ **Bounded** — it refuses to message itself, subagent sessions or archived sessions; one message is capped at 64 KB; each session can open at most 10 new sessions per run; subagents don't see the tools.
-- 📒 **Task contract** (added in this fork) — a message carrying `task_id` appends to a task ledger: one task has one writer at a time, every wake-up carries what is already done, and each round closes with a `status` receipt. The board is rendered to `board.md` and readable through `session_tasks`.
+- 📒 **Task contract** (added in this fork) — a message carrying `task_id` appends to a task ledger: one task has one writer at a time, every wake-up carries what is already done, and each round closes with a `status` receipt. The board is rendered to `board.md` and readable through `session_tasks`. A watchdog retries a round that stops reporting.
+- 🗂️ **Archive sessions** (added in this fork) — `session_archive` lets the dispatcher retire a finished worker: it leaves the sidebar and takes no messages, yet nothing is deleted and `unarchive: true` restores it. Deleting is not exposed to the model because it cannot be undone; it stays in the session menu for a human.
 
 ## Installation
 
@@ -133,6 +134,7 @@ You don't need the tool names; tell the agent what you want:
 | `session_send_message` | `session_id` `message` `delivery?` `task_id?` `this_round?` `already_done?` `status?` `done?` `note?` `task_title?` `force?` | Sends a message; with `task_id` it is a dispatch (context plus lock), with `status` it is a receipt |
 | `session_create` | `title` `message` `workspace?` `task_id?` `this_round?` `already_done?` `note?` `force?` | Opens a session and starts it with the message; with `task_id` the new session becomes that task's writer |
 | `session_tasks` | `task_id?` `limit?` | Task board: holder, round, what is done, what this round is for |
+| `session_archive` | `session_id` `unarchive?` | Archive a session (leaves the sidebar, takes no messages, restorable); deleting is not offered |
 
 The tools return a delivery confirmation, not the other session's answer; an answer arrives later as a new message in the sending session.
 
@@ -261,7 +263,7 @@ sequenceDiagram
 
 | File | Where | Role |
 | --- | :---: | --- |
-| `lib/index.js` | Host | The four tools, message relay, task-context injection, the watchdog, hiding the tools from subagents |
+| `lib/index.js` | Host | The five tools, message relay, task-context injection, the watchdog, hiding the tools from subagents |
 | `lib/tasks.js` | Host | Task ledger: event folding, one-writer rule, duplicate guard, board.md rendering |
 | `lib/client.js` | Browser | Draws relayed messages as user-style bubbles marked with the sending session |
 | `cordis.patch.yml` | Patch | The plugin row and its default config |
@@ -276,7 +278,7 @@ sequenceDiagram
 - Opening a session goes through `sessionController.create({ workspaceId })`, the web interface's new-chat path. The title is set before the first turn starts, because relayed messages never trigger DSH's automatic titling.
 - Both run inside `withoutInitiator`: the other side is an independent top-level session, not work started by the sender's turn.
 - The attribution line ends with a blank line, because adjacent text blocks reach the model joined together.
-- Subagents get the four tools hidden with `agent.ctx.tools.restrict({ deny })` in `agent/created`, since they cannot receive replies through this channel.
+- Subagents get the five tools hidden with `agent.ctx.tools.restrict({ deny })` in `agent/created`, since they cannot receive replies through this channel.
 - The browser half overrides the Chat `turn-trigger` renderer for this plugin's relayed messages only and reuses DSH's own `conversation.chat.user.content` bubble; goals, schedules, subagent results and other triggers keep the built-in card. Only the display changes; what the model receives stays the same.
 
 </details>
@@ -295,6 +297,7 @@ sequenceDiagram
 - The ledger is **local**: a synced folder works, but two machines writing it will each keep their own; sessions started headless from the CLI do not go through this plugin and are not bound by the one-writer rule.
 - The watchdog treats “no report” as failure and cannot tell a dead turn from a finished one that never reported; the latter is retried once too. Writing the receipt is what avoids that.
 - Retries are capped (2 by default): endless retries would only burn tokens on a task that is already broken.
+- Archiving a session that still holds a task turns it into a lost round: the watchdog retries on timeout, and an archived session takes no messages. Let it report and finish the task first.
 
 ## Development
 
