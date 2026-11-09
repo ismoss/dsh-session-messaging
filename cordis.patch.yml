@@ -5,6 +5,11 @@
 #   createLimit      new sessions one session may open with session_create per Harness run
 #   taskDir          where task ledgers and board.md live (default: $DSH_HOME/session-tasks)
 #   dupWindowMinutes how long an identical instruction to the same session counts as a resend (0 = off)
+#   watchdog         scan task ledgers for silent rounds (false stops the timer)
+#   watchdogMinutes  minutes without a report before a round counts as lost
+#   autoRetry        re-dispatch a lost round automatically (false = notify the dispatcher only)
+#   maxRetries       consecutive auto-retries before the watchdog stops and asks the dispatcher
+#   watchdogTickSeconds  how often the watchdog scans, in seconds
 - insert:
     - id: session-messaging
       name: '@tonyzdev/dsh-session-messaging'
@@ -14,3 +19,8 @@
         listLimit: 20
         createLimit: 10
         dupWindowMinutes: 30
+        watchdog: true
+        watchdogMinutes: 25
+        autoRetry: true
+        maxRetries: 2
+        watchdogTickSeconds: 60

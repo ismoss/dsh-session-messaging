@@ -198,6 +198,24 @@ session_send_message({
 
 **Duplicate guard:** the same “this round” list sent to the same session again inside `dupWindowMinutes` (default 30) is refused as a resend; pass `force: true` to send it anyway.
 
+### Watchdog: no report is treated as failure
+
+Relayed messages are asynchronous: the dispatcher's turn ends when it dispatches, and only a report starts the next one. The real failure is therefore not an error — it is **silence**. A dead model call, an exhausted quota, a stopped gateway or a closed session all look identical from the dispatcher's side.
+
+The watchdog covers that. Once a minute it scans the ledgers for a task that is `doing`, whose last dispatch is older than `watchdogMinutes` (25 by default), and that has no report since. It then checks the session:
+
+| Session state | Verdict | Action |
+| --- | --- | --- |
+| running | merely slow | skip — retrying a live turn would double-run the work |
+| idle / stored | lost | re-dispatch once, then tell the dispatching session |
+
+Retries are budgeted: after `maxRetries` (2 by default) consecutive retries it stops and sends a “needs your decision” notice instead. Any report resets the budget to zero.
+
+> [!NOTE]
+> The watchdog only sees rounds dispatched with a `task_id`. A plain message leaves no ledger entry, so silence there is invisible.
+
+A retry starts with 「【看门狗重派】」 and repeats the task context, so the recipient knows it is a retry rather than a new task; the notice starts with 「【看门狗】」 and says what the watchdog already did, so the dispatcher does not dispatch again.
+
 ## Settings
 
 | Field | Default | Description |
@@ -208,6 +226,11 @@ session_send_message({
 | `createLimit` | `10` | New sessions one session may open in one run |
 | `taskDir` | `$DSH_HOME/session-tasks` | Where task ledgers and board.md live; DSH_SESSION_TASKS_DIR also works |
 | `dupWindowMinutes` | `30` | Same instruction to the same session inside this window counts as a resend; 0 disables |
+| `watchdog` | `true` | Scan ledgers for silent rounds |
+| `watchdogMinutes` | `25` | Minutes without a report before a round counts as lost |
+| `autoRetry` | `true` | Re-dispatch a lost round; `false` only notifies |
+| `maxRetries` | `2` | Consecutive retries before it stops and asks |
+| `watchdogTickSeconds` | `60` | Scan interval in seconds |
 
 > [!TIP]
 > To change them, add a row to your profile's patch file (for the desktop app, `~/.dsh/profiles/desktop/cordis.patch.yml`). Write only the fields you want to change; the rest keep their defaults:
@@ -238,7 +261,7 @@ sequenceDiagram
 
 | File | Where | Role |
 | --- | :---: | --- |
-| `lib/index.js` | Host | The four tools, message relay, task-context injection, hiding the tools from subagents |
+| `lib/index.js` | Host | The four tools, message relay, task-context injection, the watchdog, hiding the tools from subagents |
 | `lib/tasks.js` | Host | Task ledger: event folding, one-writer rule, duplicate guard, board.md rendering |
 | `lib/client.js` | Browser | Draws relayed messages as user-style bubbles marked with the sending session |
 | `cordis.patch.yml` | Patch | The plugin row and its default config |
@@ -269,6 +292,9 @@ sequenceDiagram
 - Bubbles don't render Markdown and don't collapse long messages.
 - Sending has no rate limit; reply loops are discouraged only by the attribution line. `createLimit` lives in memory, resets when the plugin reloads or Harness restarts, and doesn't stop chains such as A opens B, then B opens C.
 - A title set by `session_create` is fixed like a manual rename, so DSH won't retitle the session later.
+- The ledger is **local**: a synced folder works, but two machines writing it will each keep their own; sessions started headless from the CLI do not go through this plugin and are not bound by the one-writer rule.
+- The watchdog treats “no report” as failure and cannot tell a dead turn from a finished one that never reported; the latter is retried once too. Writing the receipt is what avoids that.
+- Retries are capped (2 by default): endless retries would only burn tokens on a task that is already broken.
 
 ## Development
 

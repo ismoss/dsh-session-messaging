@@ -8,10 +8,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CREATE_TOOL, LIST_TOOL, SEND_TOOL, TASK_TOOL, TOOL_NAMES, apply, normalizeConfig, relayContent } from "../lib/index.js";
-import { DEFAULT_DUP_WINDOW_MINUTES, stateOf } from "../lib/tasks.js";
+import { CREATE_TOOL, LIST_TOOL, SEND_TOOL, TASK_TOOL, TOOL_NAMES, apply, normalizeConfig, relayContent, watchdogTick } from "../lib/index.js";
+import { DEFAULT_DUP_WINDOW_MINUTES, deriveState, stateOf } from "../lib/tasks.js";
 
 const WORKSPACE = "/work/main";
+const T0 = Date.parse("2026-11-09T03:00:00.000Z");
 
 function tempDir() {
 	return mkdtempSync(join(tmpdir(), "dsh-session-messaging-"));
@@ -435,7 +436,12 @@ test("normalizes config and builds attribution text", () => {
 		listLimit: 20,
 		createLimit: 10,
 		taskDir: undefined,
-		dupWindowMinutes: DEFAULT_DUP_WINDOW_MINUTES
+		dupWindowMinutes: DEFAULT_DUP_WINDOW_MINUTES,
+		watchdog: true,
+		watchdogMinutes: 25,
+		autoRetry: true,
+		maxRetries: 2,
+		watchdogTickSeconds: 60
 	});
 	assert.deepEqual(normalizeConfig({ crossWorkspace: false, maxMessageBytes: -1, listLimit: 500, createLimit: 0 }), {
 		crossWorkspace: false,
@@ -443,15 +449,25 @@ test("normalizes config and builds attribution text", () => {
 		listLimit: 100,
 		createLimit: 10,
 		taskDir: undefined,
-		dupWindowMinutes: DEFAULT_DUP_WINDOW_MINUTES
+		dupWindowMinutes: DEFAULT_DUP_WINDOW_MINUTES,
+		watchdog: true,
+		watchdogMinutes: 25,
+		autoRetry: true,
+		maxRetries: 2,
+		watchdogTickSeconds: 60
 	});
-	assert.deepEqual(normalizeConfig({ taskDir: "  E:/tasks  ", dupWindowMinutes: 0 }), {
+	assert.deepEqual(normalizeConfig({ taskDir: "  E:/tasks  ", dupWindowMinutes: 0, watchdog: false, watchdogMinutes: 0, maxRetries: -1 }), {
 		crossWorkspace: true,
 		maxMessageBytes: 65536,
 		listLimit: 20,
 		createLimit: 10,
 		taskDir: "E:/tasks",
-		dupWindowMinutes: 0
+		dupWindowMinutes: 0,
+		watchdog: false,
+		watchdogMinutes: 25,
+		autoRetry: true,
+		maxRetries: 2,
+		watchdogTickSeconds: 60
 	});
 	const [head, body] = relayContent({ id: 'say "hi"', title: 'a "b"' }, "text");
 	assert.equal(head.text.startsWith('Message from session "say \\"hi\\"" ("a \\"b\\""). '), true);
@@ -652,3 +668,92 @@ test("session_list marks the task each session holds", async () => {
 	assert.match(h.tools.get(LIST_TOOL).output.render({}, list)[0].text, /- session-c \[inactive\] untitled \| active \S+ \| task "login"/);
 });
 
+
+test("the watchdog re-dispatches a silent round and tells the hub", async () => {
+	const dir = tempDir();
+	const hub = makeAgent("session-hub", { title: "Hub" });
+	const worker = makeAgent("session-b", { title: "Builder" });
+	const h = harness({ live: [hub, worker] });
+	const raw = { taskDir: dir, watchdog: false, watchdogMinutes: 25 };
+	apply(h.ctx, raw);
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-b", message: "go", task_id: "login", this_round: ["step one"] }, exec(hub));
+
+	const acted = await watchdogTick(h.ctx, normalizeConfig(raw), { now: Date.now() + 26 * 60_000 });
+	assert.deepEqual(acted, [{ id: "login", action: "redispatch", round: 1 }]);
+
+	const retry = worker.received.at(-1).message;
+	assert.match(retry.content[0].text, /^【看门狗重派】/);
+	assert.match(retry.content[0].text, /session "session-hub"/);
+	assert.match(retry.content[1].text, /【任务 login · 第 2 轮 · 进行中】/);
+	assert.deepEqual(retry.source, { kind: "agent-message", form: "watchdog", task: "login" });
+
+	const notice = hub.received.at(-1).message;
+	assert.match(notice.content[0].text, /【看门狗】任务 login · 第 1 轮/);
+	assert.match(notice.content[0].text, /已自动重派为第 2 轮/);
+	assert.equal(stateOf(dir, "login").rounds, 2);
+	assert.equal(stateOf(dir, "login").status, "doing");
+});
+
+test("a running session is never treated as lost", async () => {
+	const dir = tempDir();
+	const hub = makeAgent("session-hub");
+	const worker = makeAgent("session-b", { status: "running" });
+	const h = harness({ live: [hub, worker] });
+	const raw = { taskDir: dir, watchdog: false };
+	apply(h.ctx, raw);
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-b", message: "go", task_id: "login", this_round: ["x"] }, exec(hub));
+	const acted = await watchdogTick(h.ctx, normalizeConfig(raw), { now: Date.now() + 60 * 60_000 });
+	assert.deepEqual(acted, []);
+	assert.equal(worker.received.length, 1, "no second message was pushed into a live turn");
+});
+
+test("a round inside the window is untouched", async () => {
+	const dir = tempDir();
+	const hub = makeAgent("session-hub");
+	const worker = makeAgent("session-b");
+	const h = harness({ live: [hub, worker] });
+	const raw = { taskDir: dir, watchdog: false, watchdogMinutes: 25 };
+	apply(h.ctx, raw);
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-b", message: "go", task_id: "login" }, exec(hub));
+	const acted = await watchdogTick(h.ctx, normalizeConfig(raw), { now: Date.now() + 10 * 60_000 });
+	assert.deepEqual(acted, []);
+});
+
+test("with autoRetry off the watchdog only reports, and stops at maxRetries", async () => {
+	const dir = tempDir();
+	const hub = makeAgent("session-hub");
+	const worker = makeAgent("session-b");
+	const h = harness({ live: [hub, worker] });
+	const off = normalizeConfig({ taskDir: dir, watchdog: false, autoRetry: false });
+	apply(h.ctx, { taskDir: dir, watchdog: false, autoRetry: false });
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-b", message: "go", task_id: "login", this_round: ["x"] }, exec(hub));
+	const first = await watchdogTick(h.ctx, off, { now: Date.now() + 26 * 60_000 });
+	assert.deepEqual(first, [{ id: "login", action: "exhausted", round: 1 }]);
+	assert.equal(worker.received.length, 1, "nothing was pushed to the worker");
+	assert.match(hub.received.at(-1).message.content[0].text, /停手等你决定/);
+
+	const limited = tempDir();
+	const h2 = harness({ live: [makeAgent("session-hub2"), makeAgent("session-b2")] });
+	const raw = { taskDir: limited, watchdog: false, maxRetries: 1 };
+	apply(h2.ctx, raw);
+	const hub2 = h2.agents.get("session-hub2");
+	const worker2 = h2.agents.get("session-b2");
+	await h2.tools.get(SEND_TOOL).execute({ session_id: "session-b2", message: "go", task_id: "t2", this_round: ["y"] }, exec(hub2));
+	const config = normalizeConfig(raw);
+	await watchdogTick(h2.ctx, config, { now: Date.now() + 26 * 60_000 });
+	const again = await watchdogTick(h2.ctx, config, { now: Date.now() + 52 * 60_000 });
+	assert.deepEqual(again, [{ id: "t2", action: "exhausted", round: 2 }]);
+	assert.equal(worker2.received.length, 2, "exactly one retry reached the worker");
+	assert.equal(stateOf(limited, "t2").attempts, 1);
+});
+
+test("a report resets the retry budget", () => {
+	const events = [
+		{ at: new Date(T0).toISOString(), kind: "alert", task: "t", round: 1, action: "redispatch" },
+		{ at: new Date(T0 + 1000).toISOString(), kind: "alert", task: "t", round: 2, action: "redispatch" },
+		{ at: new Date(T0 + 2000).toISOString(), kind: "report", task: "t", by: "s-a", status: "blocked" }
+	];
+	const state = deriveState("t", events);
+	assert.equal(state.attempts, 0);
+	assert.equal(state.status, "blocked");
+});

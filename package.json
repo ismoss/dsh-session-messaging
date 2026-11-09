@@ -1,7 +1,7 @@
 {
   "name": "@tonyzdev/dsh-session-messaging",
   "description": "Lets one top-level DSH session message another or open a new one: session_list finds sessions, session_send_message delivers an attributed message that wakes or resumes the target, session_create opens a titled session that starts with a message, and recipients can reply the same way. Carries an appending task ledger so one task has one writer, each wake-up knows what is already done, and every round ends with a receipt",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": "tonyzdev",
   "license": "MIT",
   "icon": "./icon.svg",

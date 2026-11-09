@@ -16,6 +16,7 @@ import {
 	listStates,
 	normalizeItems,
 	normalizeTaskId,
+	recordAlert,
 	recordDispatch,
 	recordReport,
 	recordTakeover,
@@ -164,4 +165,19 @@ test("the ledger directory honours the override, then DSH_HOME, then the home de
 		}
 	}
 	assert.equal(DEFAULT_DUP_WINDOW_MINUTES, 30);
+});
+test("a timed-out round is marked on the board", () => {
+	const dir = tempDir();
+	recordDispatch(dir, { task: "slow", by: "s-a", to: "s-b", toTitle: "Builder", round: 1, next: ["x"], title: "Slow" });
+	recordAlert(dir, { task: "slow", round: 1, action: "redispatch", ageMinutes: 26 });
+	const state = stateOf(dir, "slow");
+	assert.equal(state.attempts, 1);
+	assert.equal(state.lastAlert.round, 1);
+	const board = readFileSync(join(dir, "board.md"), "utf8");
+	assert.match(board, /进行中（第 1 轮超时，已重试 1 次）/);
+	assert.match(board, /已自动重派/);
+	// The next dispatch clears the marker: the task is running again.
+	recordDispatch(dir, { task: "slow", by: "s-a", to: "s-b", toTitle: "Builder", round: 2, next: ["x"] });
+	assert.equal(stateOf(dir, "slow").lastAlert, undefined);
+	assert.doesNotMatch(readFileSync(join(dir, "board.md"), "utf8"), /超时/);
 });
