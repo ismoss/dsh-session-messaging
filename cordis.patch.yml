@@ -1,8 +1,10 @@
 # dsh-session-messaging: top-level sessions can message each other and open new sessions.
 #   crossWorkspace   allow listing, messaging, and opening sessions in other workspaces (false = same workspace only)
-#   maxMessageBytes  size limit of one relayed message, including its attribution line
+#   maxMessageBytes  size limit of one relayed message, including its attribution line and task context
 #   listLimit        default number of rows session_list returns (at most 100)
 #   createLimit      new sessions one session may open with session_create per Harness run
+#   taskDir          where task ledgers and board.md live (default: $DSH_HOME/session-tasks)
+#   dupWindowMinutes how long an identical instruction to the same session counts as a resend (0 = off)
 - insert:
     - id: session-messaging
       name: '@tonyzdev/dsh-session-messaging'
@@ -11,3 +13,4 @@
         maxMessageBytes: 65536
         listLimit: 20
         createLimit: 10
+        dupWindowMinutes: 30

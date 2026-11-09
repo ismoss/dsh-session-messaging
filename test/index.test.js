@@ -4,10 +4,18 @@
  * tool restriction.
  */
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { CREATE_TOOL, LIST_TOOL, SEND_TOOL, TOOL_NAMES, apply, normalizeConfig, relayContent } from "../lib/index.js";
+import { CREATE_TOOL, LIST_TOOL, SEND_TOOL, TASK_TOOL, TOOL_NAMES, apply, normalizeConfig, relayContent } from "../lib/index.js";
+import { DEFAULT_DUP_WINDOW_MINUTES, stateOf } from "../lib/tasks.js";
 
 const WORKSPACE = "/work/main";
+
+function tempDir() {
+	return mkdtempSync(join(tmpdir(), "dsh-session-messaging-"));
+}
 
 function makeAgent(id, { cwd = WORKSPACE, status = "idle", origin, title } = {}) {
 	const agent = {
@@ -421,14 +429,226 @@ test("hides the tools from subagents, including ones live before activation", ()
 });
 
 test("normalizes config and builds attribution text", () => {
-	assert.deepEqual(normalizeConfig(undefined), { crossWorkspace: true, maxMessageBytes: 65536, listLimit: 20, createLimit: 10 });
+	assert.deepEqual(normalizeConfig(undefined), {
+		crossWorkspace: true,
+		maxMessageBytes: 65536,
+		listLimit: 20,
+		createLimit: 10,
+		taskDir: undefined,
+		dupWindowMinutes: DEFAULT_DUP_WINDOW_MINUTES
+	});
 	assert.deepEqual(normalizeConfig({ crossWorkspace: false, maxMessageBytes: -1, listLimit: 500, createLimit: 0 }), {
 		crossWorkspace: false,
 		maxMessageBytes: 65536,
 		listLimit: 100,
-		createLimit: 10
+		createLimit: 10,
+		taskDir: undefined,
+		dupWindowMinutes: DEFAULT_DUP_WINDOW_MINUTES
+	});
+	assert.deepEqual(normalizeConfig({ taskDir: "  E:/tasks  ", dupWindowMinutes: 0 }), {
+		crossWorkspace: true,
+		maxMessageBytes: 65536,
+		listLimit: 20,
+		createLimit: 10,
+		taskDir: "E:/tasks",
+		dupWindowMinutes: 0
 	});
 	const [head, body] = relayContent({ id: 'say "hi"', title: 'a "b"' }, "text");
 	assert.equal(head.text.startsWith('Message from session "say \\"hi\\"" ("a \\"b\\""). '), true);
 	assert.equal(body.text, "text");
 });
+
+test("a dispatch carrying task_id injects the ledger context and takes the lock", async () => {
+	const dir = tempDir();
+	const sender = makeAgent("session-a");
+	const target = makeAgent("session-b", { title: "Login refactor" });
+	const h = harness({ live: [sender, target] });
+	apply(h.ctx, { taskDir: dir });
+	const value = await h.tools
+		.get(SEND_TOOL)
+		.execute({ session_id: "session-b", message: "把登录页接到 AuthService", task_id: "login", this_round: ["接到 AuthService"] }, exec(sender));
+	assert.deepEqual(value.task, { id: "login", round: 1, status: "dispatched" });
+	const message = target.received[0].message;
+	assert.equal(message.content.length, 3);
+	assert.equal(message.content[2].text, "把登录页接到 AuthService");
+	const context = message.content[1].text;
+	assert.match(context, /^【任务 login · 第 1 轮 · 进行中】/);
+	assert.match(context, /项目：Login refactor/);
+	assert.match(context, /- （无，这是第一轮）/);
+	assert.match(context, /本次只做：\n- 接到 AuthService/);
+	assert.match(context, /session_id="session-a", task_id="login", status="done"/);
+	assert.match(h.tools.get(SEND_TOOL).output.render({}, value)[0].text, /Task "login" round 1 is now held by that session\./);
+	assert.equal(stateOf(dir, "login").owner, "session-b");
+	assert.equal(stateOf(dir, "login").rounds, 1);
+});
+
+test("a plain message stays three-part-free", async () => {
+	const sender = makeAgent("session-a");
+	const target = makeAgent("session-b");
+	const h = harness({ live: [sender, target] });
+	apply(h.ctx, { taskDir: tempDir() });
+	const value = await h.tools.get(SEND_TOOL).execute({ session_id: "session-b", message: "hi" }, exec(sender));
+	assert.equal(value.task, undefined);
+	assert.equal(target.received[0].message.content.length, 2);
+});
+
+test("one task has one writer: a second session is refused until it forces a takeover", async () => {
+	const dir = tempDir();
+	const sender = makeAgent("session-a");
+	const first = makeAgent("session-b", { title: "Builder" });
+	const second = makeAgent("session-c", { title: "Other" });
+	const h = harness({ live: [sender, first, second] });
+	apply(h.ctx, { taskDir: dir });
+	const send = (args) => h.tools.get(SEND_TOOL).execute({ task_id: "login", message: "go", ...args }, exec(sender));
+	await send({ session_id: "session-b", this_round: ["step 1"] });
+	await assert.rejects(send({ session_id: "session-c", this_round: ["step 2"] }), /is held by session session-b \("Builder"\)/);
+	assert.equal(second.received.length, 0);
+
+	const forced = await send({ session_id: "session-c", this_round: ["step 2"], force: true });
+	assert.deepEqual(forced.task, { id: "login", round: 2, status: "dispatched", tookOver: true });
+	assert.match(h.tools.get(SEND_TOOL).output.render({}, forced)[0].text, /taken over from its previous owner/);
+	const context = second.received[0].message.content[1].text;
+	assert.match(context, /第 2 轮/);
+	assert.equal(stateOf(dir, "login").owner, "session-c");
+});
+
+test("a report releases the lock and lands in the next round's history", async () => {
+	const dir = tempDir();
+	const a = makeAgent("session-a");
+	const b = makeAgent("session-b", { title: "Builder" });
+	const c = makeAgent("session-c");
+	const h = harness({ live: [a, b, c] });
+	apply(h.ctx, { taskDir: dir });
+	const send = (caller, args) => h.tools.get(SEND_TOOL).execute({ task_id: "login", ...args }, exec(caller));
+
+	await send(a, { session_id: "session-b", message: "go", this_round: ["接到 AuthService"] });
+	const reported = await send(b, {
+		session_id: "session-a",
+		message: "接好了，单测也过了",
+		status: "done",
+		done: ["拆出 AuthService", "登录页已接上"]
+	});
+	assert.deepEqual(reported.task, { id: "login", round: 1, status: "done" });
+	assert.match(h.tools.get(SEND_TOOL).output.render({}, reported)[0].text, /Recorded task "login" as done\./);
+	const after = stateOf(dir, "login");
+	assert.equal(after.status, "done");
+	assert.deepEqual(after.done, ["拆出 AuthService", "登录页已接上"]);
+	assert.equal(after.summary, "接好了，单测也过了");
+
+	// done releases the task: another session may pick it up, and sees what is already finished.
+	const next = await send(a, { session_id: "session-c", message: "接着做", this_round: ["补 E2E"] });
+	assert.equal(next.task.round, 2);
+	const context = c.received[0].message.content[1].text;
+	assert.match(context, /- 拆出 AuthService\n- 登录页已接上/);
+	assert.match(context, /- 补 E2E/);
+});
+
+test("reporting needs a task, and an unknown status is refused", async () => {
+	const sender = makeAgent("session-a");
+	const target = makeAgent("session-b");
+	const h = harness({ live: [sender, target] });
+	apply(h.ctx, { taskDir: tempDir() });
+	const send = (args) => h.tools.get(SEND_TOOL).execute(args, exec(sender));
+	await assert.rejects(send({ session_id: "session-b", message: "x", status: "done" }), /status requires task_id/);
+	await assert.rejects(send({ session_id: "session-b", message: "x", task_id: "t", status: "finished" }), /status must be/);
+	assert.equal(target.received.length, 0);
+});
+
+test("repeating the same instruction inside the window is refused unless forced", async () => {
+	const dir = tempDir();
+	const sender = makeAgent("session-a");
+	const target = makeAgent("session-b");
+	const h = harness({ live: [sender, target] });
+	apply(h.ctx, { taskDir: dir, dupWindowMinutes: 60 });
+	const send = (args) => h.tools.get(SEND_TOOL).execute({ session_id: "session-b", task_id: "login", message: "go", ...args }, exec(sender));
+	await send({ this_round: ["same"] });
+	await assert.rejects(send({ this_round: ["same"] }), /already dispatched this exact instruction/);
+	await send({ this_round: ["different"] });
+	await send({ this_round: ["same"], force: true });
+	assert.equal(target.received.length, 3);
+});
+
+test("session_create with task_id makes the new session the single writer", async () => {
+	const dir = tempDir();
+	const creator = makeAgent("session-a");
+	const h = harness({ live: [creator], workspaces: WORKSPACES });
+	apply(h.ctx, { taskDir: dir });
+	const value = await h.tools.get(CREATE_TOOL).execute(
+		{ title: "Login refactor", message: "开工", task_id: "login", this_round: ["先拆服务"], note: 3 },
+		exec(creator)
+	);
+	assert.deepEqual(value.task, { id: "login", round: 1, status: "dispatched" });
+	const opened = h.agents.get(value.sessionId);
+	const context = opened.received[0].message.content[1].text;
+	assert.match(context, /项目：Login refactor/);
+	assert.match(context, /便签：#3/);
+	const state = stateOf(dir, "login");
+	assert.equal(state.owner, value.sessionId);
+	assert.equal(state.note, 3);
+	assert.equal(state.title, "Login refactor");
+
+	// A second create for the same held task is refused; reporting done frees it.
+	await assert.rejects(
+		h.tools.get(CREATE_TOOL).execute({ title: "Another", message: "x", task_id: "login" }, exec(creator)),
+		/is held by session/
+	);
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-a", message: "done", task_id: "login", status: "done" }, exec(opened));
+	assert.equal(stateOf(dir, "login").status, "done");
+});
+
+test("session_create cannot report a status", async () => {
+	const creator = makeAgent("session-a");
+	const h = harness({ live: [creator], workspaces: WORKSPACES });
+	apply(h.ctx, { taskDir: tempDir() });
+	await assert.rejects(
+		h.tools.get(CREATE_TOOL).execute({ title: "t", message: "x", task_id: "login", status: "done" }, exec(creator)),
+		/cannot report a task status/
+	);
+	assert.deepEqual(h.createRequests, []);
+});
+
+test("session_tasks shows the board, one task, and refuses unknown ids", async () => {
+	const dir = tempDir();
+	const sender = makeAgent("session-a");
+	const target = makeAgent("session-b", { title: "Builder" });
+	const h = harness({ live: [sender, target] });
+	apply(h.ctx, { taskDir: dir });
+	const tasks = (args) => h.tools.get(TASK_TOOL).execute(args, exec(sender));
+
+	const empty = await tasks({});
+	assert.equal(empty.total, 0);
+	assert.match(h.tools.get(TASK_TOOL).output.render({}, empty)[0].text, /No task ledger under/);
+	await assert.rejects(tasks({ task_id: "ghost" }), /no ledger for task "ghost"/);
+
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-b", message: "go", task_id: "login", this_round: ["step"], note: 2 }, exec(sender));
+	const board = await tasks({});
+	assert.equal(board.total, 1);
+	assert.equal(board.tasks[0].owner, "session-b");
+	assert.equal(board.tasks[0].ownerTitle, "Builder");
+	assert.deepEqual(board.tasks[0].next, ["step"]);
+	assert.equal(board.tasks[0].note, 2);
+	const text = h.tools.get(TASK_TOOL).output.render({}, board)[0].text;
+	assert.match(text, /- login \[doing\] round 1 owner session-b \("Builder"\) \| this round: step/);
+
+	const one = await tasks({ task_id: "login" });
+	assert.equal(one.total, 1);
+});
+
+test("session_list marks the task each session holds", async () => {
+	const dir = tempDir();
+	const caller = makeAgent("session-b");
+	const summaries = [
+		{ sessionId: "session-a", updatedAt: 9, running: false, blank: false, cwd: WORKSPACE, projections: { values: { title: "Planner" } } },
+		{ sessionId: "session-b", updatedAt: 8, running: true, blank: false, cwd: WORKSPACE },
+		{ sessionId: "session-c", updatedAt: 7, running: false, blank: false, cwd: WORKSPACE }
+	];
+	const h = harness({ live: [caller], stored: [{ id: "session-c", cwd: WORKSPACE }], summaries });
+	apply(h.ctx, { taskDir: dir });
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-c", message: "go", task_id: "login" }, exec(makeAgent("session-a")));
+	const list = await h.tools.get(LIST_TOOL).execute({}, exec(caller));
+	const byId = new Map(list.sessions.map((row) => [row.sessionId, row]));
+	assert.equal(byId.get("session-c").task, "login");
+	assert.equal(byId.get("session-a").task, undefined);
+	assert.match(h.tools.get(LIST_TOOL).output.render({}, list)[0].text, /- session-c \[inactive\] untitled \| active \S+ \| task "login"/);
+});
+
