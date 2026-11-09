@@ -813,14 +813,23 @@ test("hostile task ids land in one safe file per id", () => {
 	assert.equal(stateOf(dir, "../../etc/passwd").rounds, 1);
 });
 
-test("session_archive archives and restores a session without deleting it", async () => {
+test("session_archive checks first and archives only with confirm", async () => {
 	const caller = makeAgent("session-hub", { title: "Hub" });
 	const worker = makeAgent("session-b", { title: "Builder" });
 	const h = harness({ live: [caller, worker] });
-	apply(h.ctx, { watchdog: false });
+	apply(h.ctx, { taskDir: tempDir(), watchdog: false });
 	const archive = h.tools.get(ARCHIVE_TOOL);
-	const value = await archive.execute({ session_id: "session-b" }, exec(caller));
-	assert.deepEqual(value, { sessionId: "session-b", archived: true, title: "Builder" });
+
+	const check = await archive.execute({ session_id: "session-b" }, exec(caller));
+	assert.equal(check.archived, false);
+	assert.equal(check.dryRun, true);
+	assert.equal(check.ready, true);
+	assert.deepEqual(h.archiveCalls, [], "a check archives nothing");
+	assert.match(archive.output.render({}, check)[0].text, /Ready to retire/);
+
+	const value = await archive.execute({ session_id: "session-b", confirm: true }, exec(caller));
+	assert.equal(value.archived, true);
+	assert.equal(value.dryRun, false);
 	assert.deepEqual(h.archiveCalls, [{ action: "archive", id: "session-b", options: { stopActivity: true } }]);
 	assert.match(archive.output.render({}, value)[0].text, /nothing was deleted/);
 
@@ -830,6 +839,43 @@ test("session_archive archives and restores a session without deleting it", asyn
 	assert.equal(archive.presentCall({ session_id: "session-b" }).title, 'Archive session "Builder"');
 	assert.equal(archive.presentCall({ session_id: "session-b", unarchive: true }).title, 'Restore session "Builder"');
 });
+
+test("a session still holding a live task cannot be retired", async () => {
+	const dir = tempDir();
+	const hub = makeAgent("session-hub", { title: "Hub" });
+	const worker = makeAgent("session-b", { title: "Builder" });
+	const h = harness({ live: [hub, worker] });
+	apply(h.ctx, { taskDir: dir, watchdog: false });
+	const archive = h.tools.get(ARCHIVE_TOOL);
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-b", message: "go", task_id: "login", this_round: ["x"] }, exec(hub));
+
+	const check = await archive.execute({ session_id: "session-b" }, exec(hub));
+	assert.equal(check.ready, false);
+	assert.match(check.blockers[0], /still in round 1/);
+	assert.equal(check.tasks[0].id, "login");
+	assert.match(archive.output.render({}, check)[0].text, /Not ready to retire/);
+	await assert.rejects(archive.execute({ session_id: "session-b", confirm: true }, exec(hub)), /cannot be retired yet/);
+	assert.deepEqual(h.archiveCalls, []);
+
+	// A running turn is also a blocker.
+	worker.status = "running";
+	const busy = await archive.execute({ session_id: "session-b" }, exec(hub));
+	assert.match(busy.blockers.join(" "), /still running a turn/);
+	worker.status = "idle";
+
+	// Reporting done clears it.
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-hub", message: "done", task_id: "login", status: "done" }, exec(worker));
+	const after = await archive.execute({ session_id: "session-b" }, exec(hub));
+	assert.equal(after.ready, true);
+	assert.equal(after.tasks[0].status, "done");
+
+	// A task waiting for a decision blocks too.
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-b", message: "again", task_id: "login", this_round: ["y"] }, exec(hub));
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-hub", message: "? key?", task_id: "login", status: "blocked" }, exec(worker));
+	const blocked = await archive.execute({ session_id: "session-b" }, exec(hub));
+	assert.match(blocked.blockers.join(" "), /waiting for your decision/);
+});
+
 
 test("session_archive refuses itself, subagents, unknown ids and a missing registry", async () => {
 	const caller = makeAgent("session-hub");

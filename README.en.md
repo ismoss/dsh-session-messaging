@@ -38,7 +38,7 @@ A community plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepsee
 - 🔁 **No pleasantry loops** — the attribution line tells the recipient not to reply only to acknowledge, so two sessions don't trade “got it” and “thanks” forever.
 - 🛡️ **Bounded** — it refuses to message itself, subagent sessions or archived sessions; one message is capped at 64 KB; each session can open at most 10 new sessions per run; subagents don't see the tools.
 - 📒 **Task contract** (added in this fork) — a message carrying `task_id` appends to a task ledger: one task has one writer at a time, every wake-up carries what is already done, and each round closes with a `status` receipt. The board is rendered to `board.md` and readable through `session_tasks`. A watchdog retries a round that stops reporting.
-- 🗂️ **Archive sessions** (added in this fork) — `session_archive` lets the dispatcher retire a finished worker: it leaves the sidebar and takes no messages, yet nothing is deleted and `unarchive: true` restores it. Deleting is not exposed to the model because it cannot be undone; it stays in the session menu for a human.
+- 🗂️ **Archive sessions** (added in this fork) — `session_archive` lets the dispatcher retire a finished worker: it leaves the sidebar and takes no messages, yet nothing is deleted. **It checks first**: a session that is still running a turn, or still holding a task that is in progress or waiting for a decision, is refused with the reason listed. Only a clean check may be archived with `confirm: true`. Deleting is not exposed to the model because it cannot be undone; it stays in the session menu for a human.
 
 ## Installation
 
@@ -134,7 +134,7 @@ You don't need the tool names; tell the agent what you want:
 | `session_send_message` | `session_id` `message` `delivery?` `task_id?` `this_round?` `already_done?` `status?` `done?` `note?` `task_title?` `force?` | Sends a message; with `task_id` it is a dispatch (context plus lock), with `status` it is a receipt |
 | `session_create` | `title` `message` `workspace?` `task_id?` `this_round?` `already_done?` `note?` `force?` | Opens a session and starts it with the message; with `task_id` the new session becomes that task's writer |
 | `session_tasks` | `task_id?` `limit?` | Task board: holder, round, what is done, what this round is for |
-| `session_archive` | `session_id` `unarchive?` | Archive a session (leaves the sidebar, takes no messages, restorable); deleting is not offered |
+| `session_archive` | `session_id` `unarchive?` `confirm?` | Shows a retirement check first (still running? still holding a task?); `confirm: true` archives |
 
 The tools return a delivery confirmation, not the other session's answer; an answer arrives later as a new message in the sending session.
 
@@ -297,7 +297,7 @@ sequenceDiagram
 - The ledger is **local**: a synced folder works, but two machines writing it will each keep their own; sessions started headless from the CLI do not go through this plugin and are not bound by the one-writer rule.
 - The watchdog treats “no report” as failure and cannot tell a dead turn from a finished one that never reported; the latter is retried once too. Writing the receipt is what avoids that.
 - Retries are capped (2 by default): endless retries would only burn tokens on a task that is already broken.
-- Archiving a session that still holds a task turns it into a lost round: the watchdog retries on timeout, and an archived session takes no messages. Let it report and finish the task first.
+- Archiving checks the ledger: a session holding a `doing` or `blocked` task is refused with an error, not a warning. Close the round first; the tool enforces it.
 
 ## Development
 
