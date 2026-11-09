@@ -297,3 +297,16 @@ node --test test/*.test.js
 
 > [!NOTE]
 > 修改 `lib/index.js` 后，在「插件」页把本插件关掉再打开即可加载新代码，不用重启；修改 `lib/client.js` 后需要重新安装并刷新页面。
+
+## 同步上游
+
+本 fork 只加了任务合同，上游的改动这样合进来（`upstream` 已配好）：
+
+```sh
+git fetch upstream
+git merge upstream/main
+node --test test/*.test.js
+git push origin main
+```
+
+冲突基本只出现在 `lib/index.js` 的 `relayContent`（多了任务块）和工具注册处；`lib/tasks.js` 是新增文件，不参与合并。

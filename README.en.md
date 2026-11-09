@@ -280,3 +280,16 @@ The tests drive a mocked Harness context through delivery, opening sessions, eve
 
 > [!NOTE]
 > After changing `lib/index.js`, turn the plugin off and on again on the Plugins page to load the new code, without a restart; after changing `lib/client.js`, reinstall and refresh the page.
+
+## Syncing upstream
+
+This fork only adds the task contract; pull upstream changes with:
+
+```sh
+git fetch upstream
+git merge upstream/main
+node --test test/*.test.js
+git push origin main
+```
+
+Conflicts are almost always in `relayContent` (the extra task block) and the tool registrations in `lib/index.js`; `lib/tasks.js` is new and does not merge.
