@@ -4,12 +4,12 @@
  * tool restriction.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { CREATE_TOOL, LIST_TOOL, SEND_TOOL, TASK_TOOL, TOOL_NAMES, apply, normalizeConfig, relayContent, watchdogTick } from "../lib/index.js";
-import { DEFAULT_DUP_WINDOW_MINUTES, deriveState, stateOf } from "../lib/tasks.js";
+import { DEFAULT_DUP_WINDOW_MINUTES, deriveState, recordDispatch, stateOf } from "../lib/tasks.js";
 
 const WORKSPACE = "/work/main";
 const T0 = Date.parse("2026-11-09T03:00:00.000Z");
@@ -756,4 +756,52 @@ test("a report resets the retry budget", () => {
 	const state = deriveState("t", events);
 	assert.equal(state.attempts, 0);
 	assert.equal(state.status, "blocked");
+});
+
+test("a progress report does not redirect the watchdog's notice to the worker", async () => {
+	const dir = tempDir();
+	const hub = makeAgent("session-hub", { title: "Hub" });
+	const worker = makeAgent("session-b", { title: "Builder" });
+	const h = harness({ live: [hub, worker] });
+	const raw = { taskDir: dir, watchdog: false };
+	apply(h.ctx, raw);
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-b", message: "go", task_id: "login", this_round: ["x"] }, exec(hub));
+	// The worker reports progress; the dispatcher is still the hub.
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-hub", message: "半程", task_id: "login", status: "doing" }, exec(worker));
+	assert.equal(stateOf(dir, "login").by, "session-hub");
+	const before = hub.received.length;
+	await watchdogTick(h.ctx, normalizeConfig(raw), { now: Date.now() + 26 * 60_000 });
+	assert.equal(hub.received.length, before + 1, "the hub hears about the timeout");
+	assert.match(hub.received.at(-1).message.content[0].text, /【看门狗】/);
+});
+
+test("an unwritable ledger does not turn a delivered message into an error", async () => {
+	const file = join(tempDir(), "not-a-dir");
+	writeFileSync(file, "x");
+	const sender = makeAgent("session-a");
+	const target = makeAgent("session-b");
+	const h = harness({ live: [sender, target] });
+	const warnings = [];
+	h.ctx.logger.warn = (message) => warnings.push(message);
+	apply(h.ctx, { taskDir: file, watchdog: false });
+	const value = await h.tools.get(SEND_TOOL).execute({ session_id: "session-b", message: "go", task_id: "login" }, exec(sender));
+	assert.equal(value.sessionId, "session-b");
+	assert.equal(target.received.length, 1, "the message was delivered");
+	assert.match(warnings.join("\n"), /ledger write for task login failed/);
+});
+
+test("hostile task ids land in one safe file per id", () => {
+	const dir = tempDir();
+	recordDispatch(dir, { task: "../../etc/passwd", by: "s-a", to: "s-b", round: 1, next: ["x"] });
+	recordDispatch(dir, { task: "..\\..\\windows\\system32", by: "s-a", to: "s-b", round: 1, next: ["x"] });
+	recordDispatch(dir, { task: "a/b", by: "s-a", to: "s-b" });
+	recordDispatch(dir, { task: "a b", by: "s-a", to: "s-b" });
+	const files = readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
+	assert.equal(files.length, 4);
+	// Every ledger stays a single file directly inside the ledger directory, whatever the id says.
+	for (const name of files) {
+		assert.equal(name.includes("/") || name.includes("\\"), false);
+		assert.equal(resolve(dir, name).startsWith(resolve(dir)), true);
+	}
+	assert.equal(stateOf(dir, "../../etc/passwd").rounds, 1);
 });
