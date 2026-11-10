@@ -3,7 +3,7 @@
  * the board rendering, and where the ledgers live.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -134,6 +134,16 @@ test("ledgers append, list newest first, and render a readable board", () => {
 	assert.match(board, /\| `alpha` \| 已完成 \|/);
 	assert.match(board, /\| `beta` \| 进行中 \| `s-d`（Dee） \| 1 \|/);
 	assert.match(board, /## alpha[\s\S]*- 已完成：[\s\S]*- did it/);
+});
+
+test("a corrupt ledger fails closed instead of releasing its task", () => {
+	const dir = tempDir();
+	const file = fileForTask(dir, "held");
+	writeFileSync(file, '{"kind":"dispatch","task":"held","to":"worker"}\n{bad json\n');
+	assert.throws(() => stateOf(dir, "held"), /invalid task ledger.*line 2/);
+	assert.throws(() => listStates(dir), /invalid task ledger.*line 2/);
+	writeFileSync(file, "");
+	assert.throws(() => listStates(dir), /invalid task ledger.*no task identifier/);
 });
 
 test("an empty directory renders an invitation instead of a table", () => {

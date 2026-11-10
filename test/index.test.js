@@ -499,10 +499,40 @@ test("a dispatch carrying task_id injects the ledger context and takes the lock"
 	assert.match(context, /项目：Login refactor/);
 	assert.match(context, /- （无，这是第一轮）/);
 	assert.match(context, /本次只做：\n- 接到 AuthService/);
-	assert.match(context, /session_id="session-a", task_id="login", status="done"/);
+	assert.match(context, /session_id="session-a", task_id="login", round=1, status="done"/);
 	assert.match(h.tools.get(SEND_TOOL).output.render({}, value)[0].text, /Task "login" round 1 is now held by that session\./);
 	assert.equal(stateOf(dir, "login").owner, "session-b");
 	assert.equal(stateOf(dir, "login").rounds, 1);
+});
+
+test("concurrent dispatches for one task deliver to only one worker", async () => {
+	const dir = tempDir();
+	const hub = makeAgent("session-hub");
+	const first = makeAgent("session-first");
+	const second = makeAgent("session-second");
+	const h = harness({ live: [hub, first, second] });
+	apply(h.ctx, { taskDir: dir, watchdog: false });
+	const send = (target) => h.tools.get(SEND_TOOL).execute({
+		session_id: target, task_id: "shared", this_round: ["edit code"], message: "keep invariant X"
+	}, exec(hub));
+	const results = await Promise.allSettled([send("session-first"), send("session-second")]);
+	assert.deepEqual(results.map((result) => result.status).sort(), ["fulfilled", "rejected"]);
+	assert.equal(first.received.length + second.received.length, 1);
+	assert.equal(stateOf(dir, "shared").rounds, 1);
+});
+
+test("watchdog repeats the original constraints rather than only the task list", async () => {
+	const dir = tempDir();
+	const hub = makeAgent("session-hub");
+	const worker = makeAgent("session-worker");
+	const h = harness({ live: [hub, worker] });
+	const raw = { taskDir: dir, watchdog: false };
+	apply(h.ctx, raw);
+	await h.tools.get(SEND_TOOL).execute({
+		session_id: worker.id, task_id: "shared", this_round: ["edit code"], message: "保持不动：X"
+	}, exec(hub));
+	await watchdogTick(h.ctx, normalizeConfig(raw), { now: Date.now() + 26 * 60_000 });
+	assert.match(worker.received.at(-1).message.content.at(-1).text, /保持不动：X/);
 });
 
 test("a plain message stays three-part-free", async () => {
@@ -566,6 +596,66 @@ test("a report releases the lock and lands in the next round's history", async (
 	assert.match(context, /- 补 E2E/);
 });
 
+test("rejects reports from a non-holder or stale round", async () => {
+	const dir = tempDir();
+	const hub = makeAgent("session-hub");
+	const worker = makeAgent("session-worker");
+	const other = makeAgent("session-other");
+	const h = harness({ live: [hub, worker, other] });
+	apply(h.ctx, { taskDir: dir, watchdog: false });
+	const send = (caller, args) => h.tools.get(SEND_TOOL).execute({ task_id: "login", ...args }, exec(caller));
+	await send(hub, { session_id: "session-worker", message: "go", this_round: ["step"] });
+	await assert.rejects(
+		send(other, { session_id: "session-hub", message: "fake", status: "done", round: 1 }),
+		/only the current holder may report/
+	);
+	await assert.rejects(
+		send(worker, { session_id: "session-hub", message: "stale", status: "done", round: 0 }),
+		/round must be a positive integer/
+	);
+	assert.equal(stateOf(dir, "login").status, "doing");
+	await send(worker, { session_id: "session-hub", message: "real", status: "done", round: 1 });
+	assert.equal(stateOf(dir, "login").status, "done");
+});
+
+test("a report from the previous owner after takeover cannot finish the new round", async () => {
+	const dir = tempDir();
+	const hub = makeAgent("session-hub");
+	const first = makeAgent("session-first");
+	const second = makeAgent("session-second");
+	const h = harness({ live: [hub, first, second] });
+	apply(h.ctx, { taskDir: dir, watchdog: false });
+	const send = (caller, args) => h.tools.get(SEND_TOOL).execute({ task_id: "shared", ...args }, exec(caller));
+	await send(hub, { session_id: first.id, message: "first", this_round: ["step"] });
+	await send(hub, { session_id: second.id, message: "takeover", this_round: ["step"], force: true });
+	await assert.rejects(
+		send(first, { session_id: hub.id, message: "late", status: "done", round: 1 }),
+		/only the current holder may report/
+	);
+	await assert.rejects(
+		send(second, { session_id: hub.id, message: "old round", status: "done", round: 1 }),
+		/current round is 2/
+	);
+	assert.equal(stateOf(dir, "shared").owner, second.id);
+	assert.equal(stateOf(dir, "shared").status, "doing");
+	await send(second, { session_id: hub.id, message: "finished", status: "done", round: 2 });
+	assert.equal(stateOf(dir, "shared").status, "done");
+});
+
+test("a progress report refreshes watchdog activity", async () => {
+	const dir = tempDir();
+	const hub = makeAgent("session-hub");
+	const worker = makeAgent("session-worker");
+	const h = harness({ live: [hub, worker] });
+	const raw = { taskDir: dir, watchdog: false, watchdogMinutes: 25 };
+	apply(h.ctx, raw);
+	recordDispatch(dir, { at: new Date(Date.now() - 26 * 60_000).toISOString(), task: "login", by: "session-hub", to: "session-worker", round: 1, next: ["step"] });
+	// The dispatch is stale, but a fresh progress receipt restarts the silence window.
+	await h.tools.get(SEND_TOOL).execute({ session_id: "session-hub", message: "progress", task_id: "login", status: "doing", round: 1 }, exec(worker));
+	const acted = await watchdogTick(h.ctx, normalizeConfig(raw), { now: Date.now() + 60_000 });
+	assert.deepEqual(acted, []);
+});
+
 test("reporting needs a task, and an unknown status is refused", async () => {
 	const sender = makeAgent("session-a");
 	const target = makeAgent("session-b");
@@ -576,6 +666,7 @@ test("reporting needs a task, and an unknown status is refused", async () => {
 	await assert.rejects(send({ session_id: "session-b", message: "x", task_id: "t", status: "finished" }), /status must be/);
 	assert.equal(target.received.length, 0);
 });
+
 
 test("repeating the same instruction inside the window is refused unless forced", async () => {
 	const dir = tempDir();
@@ -714,6 +805,25 @@ test("a running session is never treated as lost", async () => {
 	assert.equal(worker.received.length, 1, "no second message was pushed into a live turn");
 });
 
+test("watchdog does not queue retry when session starts running during resume", async () => {
+	const dir = tempDir();
+	const hub = makeAgent("session-hub");
+	const worker = makeAgent("session-worker");
+	const h = harness({ live: [hub, worker] });
+	const raw = { taskDir: dir, watchdog: false };
+	apply(h.ctx, raw);
+	await h.tools.get(SEND_TOOL).execute({ session_id: worker.id, message: "go", task_id: "t", this_round: ["work"] }, exec(hub));
+	const original = h.ctx.sessionController.resolveAgent;
+	h.ctx.sessionController.resolveAgent = async (id) => {
+		if (id === worker.id) worker.status = "running";
+		return original(id);
+	};
+	const acted = await watchdogTick(h.ctx, normalizeConfig(raw), { now: Date.now() + 26 * 60_000 });
+	assert.deepEqual(acted, []);
+	assert.equal(worker.received.length, 1);
+	assert.equal(stateOf(dir, "t").rounds, 1);
+});
+
 test("a round inside the window is untouched", async () => {
 	const dir = tempDir();
 	const hub = makeAgent("session-hub");
@@ -752,6 +862,20 @@ test("with autoRetry off the watchdog only reports, and stops at maxRetries", as
 	assert.deepEqual(again, [{ id: "t2", action: "exhausted", round: 2 }]);
 	assert.equal(worker2.received.length, 2, "exactly one retry reached the worker");
 	assert.equal(stateOf(limited, "t2").attempts, 1);
+});
+
+test("legacy ledgers without original instructions are not automatically retried", async () => {
+	const dir = tempDir();
+	const hub = makeAgent("session-hub");
+	const worker = makeAgent("session-worker");
+	const h = harness({ live: [hub, worker] });
+	const raw = { taskDir: dir, watchdog: false };
+	apply(h.ctx, raw);
+	recordDispatch(dir, { task: "legacy", by: hub.id, to: worker.id, round: 1, next: ["edit code"] });
+	const acted = await watchdogTick(h.ctx, normalizeConfig(raw), { now: Date.now() + 26 * 60_000 });
+	assert.deepEqual(acted, [{ id: "legacy", action: "exhausted", round: 1 }]);
+	assert.equal(worker.received.length, 0);
+	assert.match(hub.received.at(-1).message.content[0].text, /旧账本没有保存原始派活消息/);
 });
 
 test("a report resets the retry budget", () => {

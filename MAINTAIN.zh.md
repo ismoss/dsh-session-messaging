@@ -19,7 +19,8 @@
 ```sh
 node --test test/*.test.js        # 改完先跑，51 条基线
 # 改 package.json 的 version
-git add -A && git commit -m "..." && git push origin main
+git add <本轮实际修改的具体路径> && git diff --cached --check && git diff --cached --stat
+# 核对暂存区后，再按项目授权执行 commit / push
 ```
 
 然后到 DSH「插件」页把 `@tonyzdev/dsh-session-messaging` **关掉再打开**——`lib/index.js` 的宿主代码不热替换。只改了 `lib/client.js` 时，还要重新安装并刷新页面。
@@ -38,8 +39,8 @@ git add -A && git commit -m "..." && git push origin main
 
 - ~~`session_archive` 真正归档的路径只在单测里跑过~~ → **已于 2026-11-10 在真实会话上验证**（`session-5cfadf90`「DSH 中枢会话工作流搭建」）：退役检查干净 → `confirm` 归档，返回「Archived…left the sidebar…nothing was deleted」，随即从 `session_list` 消失。
 - 绿点（未读点）是 DSH 客户端内存状态，插件碰不到；只能靠归档让行消失。上游记录：[#9046](https://github.com/deepseek-ai/deepseek-harness/discussions/9046)、[#12271](https://github.com/deepseek-ai/deepseek-harness/discussions/12271)。
-- `board.md` 每记一笔就全量重算：50 任务约 13 ms，500 约 74 ms。任务多了删掉已结束的 JSONL 即可。
-- 合同是软约束：模型不按格式回报时不会追问，只在 `session_tasks` 里显示「第 N 轮、没有回执」。
+- `board.md` 每记一笔就全量重算且只显示最近 30 项；看门狗/归档检查扫描全部任务。账本 JSONL 是审计历史，不要为清理看板直接删除。多 Host 进程不能共享账本目录写入，进程内队列不等于跨进程锁。
+- 合同仍有软约束：模型不按格式回报时不会追问。新版回执校验当前持有者及可选 `round`；旧轮次没带 `round` 时仍无法识别同一会话的迟到回执。新派活保存原消息供看门狗重派；旧账本没有原消息时停手通知。坏 JSONL 不再静默跳过，须人工核对。
 
 ## 五、同步上游
 
@@ -59,6 +60,7 @@ git push origin main
 | 0.4.0 | 任务合同：单写者、已完成自动带入、回执 |
 | 0.5.0 / 0.5.1 | 看门狗：无回执 25 分钟自动重派，2 次后停手；修 report 覆盖派活方、账本写失败误报投递失败 |
 | 0.6.0 / 0.6.1 | `session_archive`（归档/恢复）+ 退役检查 `confirm` 门槛 |
+| 0.6.2 | 可靠性加固：回执只认当前持有者（可选 `round` 校验）；同进程任务操作串行化；看门狗按最近派活/进度回执计时、重派保留原始消息、旧账本缺消息停手；损坏/空账本 fail closed 不再静默跳过 |
 
 ## 七、Drex（决策模型 MCP）接入
 
