@@ -9,7 +9,7 @@
 |---|---|---|---|
 | 插件源码 | 本仓库根 | 五个工具、账本、看门狗 | 中枢失去派活与回执能力 |
 | 安装 | desktop profile 的 `package.json` 用 `link:<仓库根>` | 让 DSH 加载本地这份代码 | 「插件」页里消失 |
-| 中枢 skill | `~/.dsh/skills/hub-ops`（软链到 magpie 技能库 `library/skills/hub-ops`） | 中枢的操作手册 | 中枢退回凭印象调度 |
+| 中枢 skill | `dsh-plugins` 仓的 `skills/hub-ops`（DSH 的 `~/.dsh/skills/hub-ops` 软链 → magpie 的 `library/skills/hub-ops` junction → 该目录） | 中枢的操作手册 | 中枢退回凭印象调度 |
 | 任务账本 | `$DSH_HOME/session-tasks/` | 每任务一份 JSONL + 人看的 `board.md` | 任务历史丢失（会话本身不受影响） |
 
 四者里只有前两个在 git 里；skill 由 magpie 管理，账本是本机数据，不要提交。
