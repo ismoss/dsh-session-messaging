@@ -22,6 +22,8 @@
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 社区插件。DSH 自带的消息通道都要求双方有关系：`send_message` 只在直接父子 agent 之间传递，Agent Teams 只在同一个 Team 的成员之间传递，侧栏里两个普通会话之间没有路。装上本插件后，每个顶层会话多了五个工具：找会话、发消息、开新会话、查任务看板、归档会话。收到的消息会标明来自哪个会话，对方可以用同一个工具回复。
 
 > 本仓库是 [tonyzdev/dsh-session-messaging](https://github.com/tonyzdev/dsh-session-messaging) 的 fork：在上游基础上加了「任务合同」——单写者锁、唤醒自动带已完成、每轮回执。不想用合同就照旧只传 `session_id` + `message`，行为和上游一致。
+>
+> 维护这个 fork 看 [MAINTAIN.zh.md](MAINTAIN.zh.md)：四样东西在哪、一次改动要经过哪些步骤、哪三条边界不能破、哪些还没验证。
 
 <p align="center">
   <img src="docs/demo.gif" width="932" alt="会话「整理发布说明」让 agent 去问会话「修复登录超时」；对方收到一条标着「来自会话「整理发布说明」」的消息，用同一个工具回复，回复回到原会话">
