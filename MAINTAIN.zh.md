@@ -36,7 +36,7 @@ git add -A && git commit -m "..." && git push origin main
 
 ## 四、还没验证 / 已知限制
 
-- `session_archive` 真正归档的路径**只在单测里跑过**，没在真实会话上执行过。第一次用要盯返回：失败会明确报错，不会误删。
+- ~~`session_archive` 真正归档的路径只在单测里跑过~~ → **已于 2026-11-10 在真实会话上验证**（`session-5cfadf90`「DSH 中枢会话工作流搭建」）：退役检查干净 → `confirm` 归档，返回「Archived…left the sidebar…nothing was deleted」，随即从 `session_list` 消失。
 - 绿点（未读点）是 DSH 客户端内存状态，插件碰不到；只能靠归档让行消失。上游记录：[#9046](https://github.com/deepseek-ai/deepseek-harness/discussions/9046)、[#12271](https://github.com/deepseek-ai/deepseek-harness/discussions/12271)。
 - `board.md` 每记一笔就全量重算：50 任务约 13 ms，500 约 74 ms。任务多了删掉已结束的 JSONL 即可。
 - 合同是软约束：模型不按格式回报时不会追问，只在 `session_tasks` 里显示「第 N 轮、没有回执」。
@@ -59,3 +59,14 @@ git push origin main
 | 0.4.0 | 任务合同：单写者、已完成自动带入、回执 |
 | 0.5.0 / 0.5.1 | 看门狗：无回执 25 分钟自动重派，2 次后停手；修 report 覆盖派活方、账本写失败误报投递失败 |
 | 0.6.0 / 0.6.1 | `session_archive`（归档/恢复）+ 退役检查 `confirm` 门槛 |
+
+## 七、Drex（决策模型 MCP）接入
+
+Drex 是 Nace.AI 的**决策模型** MCP，与本插件无代码依赖，是给中枢用的"判断层"：工具 `decide`（喂 state + typed questions，回校准概率：`noul` 是/否、`choice` 标签、`score` 档位）和 `list_models`；模型 `drex-v2.0` / `drex-max-v1.1`。它只做判断，不写代码，不是执行器。
+
+- **装在哪**：本机 `~/.dsh/profiles/desktop/cordis.patch.yml`，一个 `@deepseek-ai/dsh-mcp-client` 条目（`serverName: drex`）；Bearer key 只在本机配置，**不进任何公开仓**。
+- **坑（本次踩过）**：`mcp-drex` 必须写在 `- insert:` 的**列表项里**（与 `dsh-rtk` 同级、缩进 4 空格）。写成顶层平的 `- id: mcp-drex` 会被**静默忽略**，宿主里根本不出现这一项（`mcp-cocos*` 那几条平条目同理没加载）。判断：`plugin_manager` 清单里搜不到 `include:mcp-drex` 就是没加载。
+- **生效**：改完 `cordis.patch.yml` 宿主 HMR 会热加载（本次实测清单 223→224，`include:mcp-drex` `fiberPhase: active`）；没热加载就重启 DSH。
+- **已验证**：实测 `decide` 返回校准概率（`round_ok=0.937`、`needs_human=0.874`、`action=accept(0.915)`，52 ms）。
+- **怎么用**：见 hub-ops skill §九「Drex 决策闸门」（四个时刻、阈值、失败回退、数据边界）。
+- **边界**：免费额度约 10 次/分、100 次/天/网络；state 发到第三方云端，只发摘要、不塞源码/密钥；`decide` 失败一律回退原规则。
